@@ -32,6 +32,7 @@ class Watchdog:
     # ------------------------------------------------------------------
     #  Health checks
     # ------------------------------------------------------------------
+
     def check_gpsd(self) -> bool:
         """
         Try to connect to gpsd and issue a VERSION command.
@@ -57,7 +58,6 @@ class Watchdog:
             return False
 
         # Simple heuristic: look for "Leap status     : Normal"
-        # and "System time     : X seconds fast/slow"
         if "Leap status     : Normal" not in out:
             return False
 
@@ -105,6 +105,7 @@ class Watchdog:
     # ------------------------------------------------------------------
     #  Actions
     # ------------------------------------------------------------------
+
     def restart_service(self, name: str):
         try:
             subprocess.run(["systemctl", "restart", name], check=False)
@@ -120,6 +121,7 @@ class Watchdog:
     # ------------------------------------------------------------------
     #  Main loop
     # ------------------------------------------------------------------
+
     def run(self):
         """
         Periodic health loop.
@@ -140,10 +142,6 @@ class Watchdog:
                 unhealthy = True
                 self.restart_service("chrony")
 
-            if not influx_ok:
-                # Not necessarily unhealthy, but worth noting
-                pass
-
             if spool_bytes > self.max_spool_bytes * 0.9:
                 # Spool is >90% full → treat as unhealthy
                 unhealthy = True
@@ -163,6 +161,10 @@ class Watchdog:
             time.sleep(10)
 
 
+# ======================================================================
+#  Entrypoint
+# ======================================================================
+
 def load_env(path: str = "/etc/pi5-ptp-node/streamer.env") -> Dict[str, str]:
     env: Dict[str, str] = {}
     if not os.path.exists(path):
@@ -181,7 +183,6 @@ def load_env(path: str = "/etc/pi5-ptp-node/streamer.env") -> Dict[str, str]:
 def main():
     env = load_env()
     if not env:
-        # No env → nothing to do
         return
 
     wd = Watchdog(env)
@@ -190,3 +191,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
