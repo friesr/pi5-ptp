@@ -28,9 +28,13 @@ def setup_logger(name: str, log_dir: str = "/var/log/pi5-ptp-node", level=loggin
         return logger
 
     handler = logging.FileHandler(log_path)
+
+    # Python 3.13-safe logging format
     formatter = logging.Formatter(
-        "%Y-%m-%d %H:%M:%S [%(levelname)s] %(name)s: %(message)s"
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        "%Y-%m-%d %H:%M:%S"
     )
+
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 
