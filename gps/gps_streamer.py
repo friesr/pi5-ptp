@@ -2,6 +2,7 @@ import json
 import time
 import socket
 import threading
+import requests
 from typing import Dict, Any, List, Optional
 
 from spooler import Spooler
@@ -201,6 +202,102 @@ class GNSSStreamer:
                 epoch = GNSSParser.parse_tpv(msg, self.node_id)
                 if epoch:
                     self._handle_record(epoch)
+
+        # ----------------------------------------------------------------------
+    #  InfluxDB Write Path
+    # ----------------------------------------------------------------------
+    def _write_to_influx(self, records: List[Dict[str, Any]]) -> bool:
+        """
+        Writes a batch of records to InfluxDB.
+        Returns True on success, False on failure.
+        """
+
+        if not records:
+            return True
+
+        lines = []
+        for rec in records:
+            measurement = rec["measurement"]
+            tags = rec["tags"]
+            fields = rec["fields"]
+            ts = rec["timestamp"]
+
+            # Build InfluxDB line protocol
+            tag_str = ",".join(f"{k}={v}" for k, v in tags.items() if v is not None)
+            field_str = ",".join(
+                f"{k}={json.dumps(v)}" for k, v in fields.items() if v is not None
+            )
+
+            line = f"{measurement},{tag_str} {field_str} {int(ts * 1e9)}"
+            lines.append(line)
+
+        payload = "\n".join(lines)
+
+        url = f"{self.influx_url}/api/v2/write"
+        params = {
+            "org": self.influx_org,
+            "bucket": self.influx_bucket,
+            "precision": "ns",
+        }
+        headers = {
+            "Authorization": f"Token {self.influx_token}",
+            "Content-Type": "text/plain; charset=utf-8",
+        }
+
+        try:
+            r = requests.post(url, params=params, data=payload, headers=headers, timeout=2)
+            return r.status_code == 204
+        except Exception:
+            return False
+
+    # ----------------------------------------------------------------------
+    #  Record Handler (Live + Spool)
+    # ----------------------------------------------------------------------
+    def _handle_record(self, record: Dict[str, Any]):
+        """
+        Handles a single GNSS/PTP record:
+        - Try to send to InfluxDB immediately
+        - If fails, spool to disk
+        """
+        if self._write_to_influx([record]):
+            return
+
+        # Influx unreachable → spool
+        self.spool.append(record)
+
+    # ----------------------------------------------------------------------
+    #  Background Spool Replay Thread
+    # ----------------------------------------------------------------------
+    def start_replay_thread(self):
+        """
+        Starts a background thread that drains the spool slowly
+        while live data continues to stream.
+        """
+        t = threading.Thread(target=self._replay_loop, daemon=True)
+        t.start()
+
+    def _replay_loop(self):
+        """
+        Hybrid replay model:
+        - Live data is always prioritized
+        - Spool drains slowly in background
+        - Stops if streamer stops
+        """
+        while not self.stop_event.is_set():
+            time.sleep(2)
+
+            def handler(batch):
+                # Try to write batch
+                ok = self._write_to_influx(batch)
+                if not ok:
+                    raise RuntimeError("Influx still unreachable")
+
+            try:
+                self.spool.drain(handler, stop_event=self.stop_event, batch_size=500)
+            except Exception:
+                # Influx still down → wait and retry later
+                time.sleep(5)
+                continue
 
             # Additional gpsd classes (GST, ATT, etc.) can be added later
 
