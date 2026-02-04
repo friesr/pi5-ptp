@@ -1,6 +1,7 @@
 import os
 import time
 import logging
+import subprocess
 from pathlib import Path
 
 
@@ -56,3 +57,22 @@ def retry(operation, attempts=3, delay=0.5, exceptions=(Exception,)):
             if i == attempts - 1:
                 raise
             time.sleep(delay)
+
+
+# ======================================================================
+#  Command Helper (required by streamer + watchdog)
+# ======================================================================
+
+def run_cmd(cmd: str) -> str:
+    """
+    Executes a shell command and returns stdout as UTF-8 text.
+    Returns an empty string on failure.
+
+    This is intentionally simple and resilient because the streamer
+    and watchdog rely on it for gpspipe, chronyc, pgrep, etc.
+    """
+    try:
+        out = subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT)
+        return out.decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
