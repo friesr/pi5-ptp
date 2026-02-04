@@ -1,0 +1,16 @@
+[Unit]
+Description=GNSS to InfluxDB streamer with local spool
+After=network-online.target gpsd.service chrony.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/pi5-ptp-node/gps
+ExecStart=/usr/bin/python3 /opt/pi5-ptp-node/gps/gps_streamer.py
+Restart=always
+RestartSec=5
+EnvironmentFile=/etc/pi5-ptp-node/streamer.env
+
+[Install]
+WantedBy=multi-user.target
