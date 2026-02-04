@@ -1,13 +1,17 @@
 #!/bin/bash
 set -e
 
-echo "=== Installing Pi5 PTP Node Base System ==="
+echo "=== Pi5 PTP Node Installer ==="
 
-# Set hostname
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# ----------------------------------------------------------------------
+#  Hostname + Networking
+# ----------------------------------------------------------------------
+echo "Setting hostname..."
 echo "ptp" > /etc/hostname
 hostnamectl set-hostname ptp
 
-# Configure static IP
 if ! grep -q "interface eth0" /etc/dhcpcd.conf; then
 cat <<EOF >> /etc/dhcpcd.conf
 
@@ -20,47 +24,94 @@ static domain_name_servers=192.168.1.1
 EOF
 fi
 
-# Create config directory
+# ----------------------------------------------------------------------
+#  Directories
+# ----------------------------------------------------------------------
+echo "Creating directories..."
 mkdir -p /etc/pi5-ptp-node
 mkdir -p /var/spool/pi5-ptp-node
+mkdir -p /opt/pi5-ptp-node/gps
+mkdir -p /var/log/pi5-ptp-node
 
-# Copy example env if none exists
+# ----------------------------------------------------------------------
+#  Copy Python modules
+# ----------------------------------------------------------------------
+echo "Installing Python modules..."
+cp "$SCRIPT_DIR/gps/"*.py /opt/pi5-ptp-node/gps/
+
+# ----------------------------------------------------------------------
+#  Environment file
+# ----------------------------------------------------------------------
 if [ ! -f /etc/pi5-ptp-node/streamer.env ]; then
-    cp gps/streamer.env.example /etc/pi5-ptp-node/streamer.env
+    echo "Installing example environment file..."
+    cp "$SCRIPT_DIR/gps/streamer.env.example" /etc/pi5-ptp-node/streamer.env
 fi
 
-# Install packages
+# ----------------------------------------------------------------------
+#  Packages
+# ----------------------------------------------------------------------
+echo "Installing packages..."
 apt update
 apt install -y gpsd gpsd-clients chrony pps-tools python3 python3-pip
 
-# Enable PPS overlay
+# ----------------------------------------------------------------------
+#  Device overlays
+# ----------------------------------------------------------------------
+echo "Configuring overlays..."
+
 if ! grep -q "dtoverlay=pps-gpio" /boot/firmware/config.txt; then
     echo "dtoverlay=pps-gpio,gpiopin=18" >> /boot/firmware/config.txt
 fi
 
-# Enable UART for HAT
 if ! grep -q "enable_uart=1" /boot/firmware/config.txt; then
     echo "enable_uart=1" >> /boot/firmware/config.txt
     echo "dtoverlay=uart0" >> /boot/firmware/config.txt
 fi
 
-# Install udev rules
-cp gps/99-gnss.rules /etc/udev/rules.d/
+# ----------------------------------------------------------------------
+#  Udev rules
+# ----------------------------------------------------------------------
+echo "Installing udev rules..."
+cp "$SCRIPT_DIR/gps/99-gnss.rules" /etc/udev/rules.d/
 udevadm control --reload-rules
 
-# Install systemd overrides
+# ----------------------------------------------------------------------
+#  gpsd config
+# ----------------------------------------------------------------------
+echo "Installing gpsd configs..."
+cp "$SCRIPT_DIR/gps/gpsd.usb.conf" /etc/default/gpsd.usb.conf
+cp "$SCRIPT_DIR/gps/gpsd.hat.conf" /etc/default/gpsd.hat.conf
+
+# ----------------------------------------------------------------------
+#  chrony config
+# ----------------------------------------------------------------------
+echo "Installing chrony config..."
+cp "$SCRIPT_DIR/chrony/chrony.conf" /etc/chrony/chrony.conf
+
+# ----------------------------------------------------------------------
+#  systemd overrides
+# ----------------------------------------------------------------------
+echo "Installing systemd overrides..."
 mkdir -p /etc/systemd/system/gpsd.service.d
-cp systemd/gpsd.service.d/override.conf /etc/systemd/system/gpsd.service.d/
+cp "$SCRIPT_DIR/systemd/gpsd.service.d/override.conf" /etc/systemd/system/gpsd.service.d/
 
 mkdir -p /etc/systemd/system/chrony.service.d
-cp systemd/chrony.service.d/override.conf /etc/systemd/system/chrony.service.d/
+cp "$SCRIPT_DIR/systemd/chrony.service.d/override.conf" /etc/systemd/system/chrony.service.d/
 
-# Install chrony config
-cp chrony/chrony.conf /etc/chrony/chrony.conf
+# ----------------------------------------------------------------------
+#  systemd services
+# ----------------------------------------------------------------------
+echo "Installing systemd services..."
+cp "$SCRIPT_DIR/systemd/gps-streamer.service" /etc/systemd/system/
+cp "$SCRIPT_DIR/systemd/gps-watchdog.service" /etc/systemd/system/
 
-# Enable services
 systemctl daemon-reload
 systemctl enable gpsd
 systemctl enable chrony
+systemctl enable gps-streamer
+systemctl enable gps-watchdog
 
-echo "=== Base install complete. Reboot recommended. ==="
+# ----------------------------------------------------------------------
+#  Final
+# ----------------------------------------------------------------------
+echo "=== Installation complete. A reboot is recommended. ==="
