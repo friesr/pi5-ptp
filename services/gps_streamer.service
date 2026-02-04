@@ -1,0 +1,18 @@
+[Unit]
+Description=Pi5 GNSS Streamer
+After=network-online.target gpsd.service
+
+[Service]
+Environment=INFLUX_URL=http://192.168.1.106:8086
+Environment=INFLUX_TOKEN=REPLACE_WITH_REAL_TOKEN
+Environment=INFLUX_ORG=timing
+Environment=INFLUX_BUCKET=observatory
+
+WorkingDirectory=/home/pi/pi5-ptp/gps
+ExecStart=/usr/bin/python3 /home/pi/pi5-ptp/gps/gps_streamer.py
+
+Restart=always
+User=pi
+
+[Install]
+WantedBy=multi-user.target
