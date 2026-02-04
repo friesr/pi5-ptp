@@ -2,11 +2,16 @@ import json
 import time
 import socket
 import threading
+import subprocess
 import requests
 from typing import Dict, Any, List, Optional
 
 from spooler import Spooler
 
+
+# ======================================================================
+#  GPSD Client
+# ======================================================================
 
 class GPSDClient:
     """
@@ -62,6 +67,10 @@ class GPSDClient:
         except Exception:
             return None
 
+
+# ======================================================================
+#  GNSS Parser
+# ======================================================================
 
 class GNSSParser:
     """
@@ -153,14 +162,20 @@ class GNSSParser:
         return "UNKNOWN"
 
 
+# ======================================================================
+#  GNSS Streamer
+# ======================================================================
+
 class GNSSStreamer:
     """
     Main streamer class:
     - Connects to gpsd
     - Parses GNSS messages
     - Shapes per-satellite + per-epoch records
-    - Sends to InfluxDB (Part 2)
+    - Emits chrony metrics
+    - Sends to InfluxDB
     - Spools on failure
+    - Replays spool in background
     """
 
     def __init__(self, env: Dict[str, str]):
@@ -177,12 +192,15 @@ class GNSSStreamer:
 
         self.gpsd = GPSDClient()
         self.stop_event = threading.Event()
+        self._last_chrony_emit = 0
+
+    # ------------------------------------------------------------------
+    #  Main Loop
+    # ------------------------------------------------------------------
 
     def start(self):
-        """
-        Main loop: read gpsd messages, parse, and forward.
-        """
         self.gpsd.connect()
+        self.start_replay_thread()
 
         while not self.stop_event.is_set():
             msg = self.gpsd.read()
@@ -203,108 +221,22 @@ class GNSSStreamer:
                 if epoch:
                     self._handle_record(epoch)
 
-        # ----------------------------------------------------------------------
-    #  InfluxDB Write Path
-    # ----------------------------------------------------------------------
-    def _write_to_influx(self, records: List[Dict[str, Any]]) -> bool:
-        """
-        Writes a batch of records to InfluxDB.
-        Returns True on success, False on failure.
-        """
+            # Emit chrony metrics once per second
+            now = time.time()
+            if int(now) != int(self._last_chrony_emit):
+                self._last_chrony_emit = now
+                chrony_rec = self._emit_chrony_record()
+                if chrony_rec:
+                    self._handle_record(chrony_rec)
 
-        if not records:
-            return True
+    def stop(self):
+        self.stop_event.set()
 
-        lines = []
-        for rec in records:
-            measurement = rec["measurement"]
-            tags = rec["tags"]
-            fields = rec["fields"]
-            ts = rec["timestamp"]
+    # ------------------------------------------------------------------
+    #  Chrony Metrics
+    # ------------------------------------------------------------------
 
-            # Build InfluxDB line protocol
-            tag_str = ",".join(f"{k}={v}" for k, v in tags.items() if v is not None)
-            field_str = ",".join(
-                f"{k}={json.dumps(v)}" for k, v in fields.items() if v is not None
-            )
-
-            line = f"{measurement},{tag_str} {field_str} {int(ts * 1e9)}"
-            lines.append(line)
-
-        payload = "\n".join(lines)
-
-        url = f"{self.influx_url}/api/v2/write"
-        params = {
-            "org": self.influx_org,
-            "bucket": self.influx_bucket,
-            "precision": "ns",
-        }
-        headers = {
-            "Authorization": f"Token {self.influx_token}",
-            "Content-Type": "text/plain; charset=utf-8",
-        }
-
-        try:
-            r = requests.post(url, params=params, data=payload, headers=headers, timeout=2)
-            return r.status_code == 204
-        except Exception:
-            return False
-
-    # ----------------------------------------------------------------------
-    #  Record Handler (Live + Spool)
-    # ----------------------------------------------------------------------
-    def _handle_record(self, record: Dict[str, Any]):
-        """
-        Handles a single GNSS/PTP record:
-        - Try to send to InfluxDB immediately
-        - If fails, spool to disk
-        """
-        if self._write_to_influx([record]):
-            return
-
-        # Influx unreachable → spool
-        self.spool.append(record)
-
-    # ----------------------------------------------------------------------
-    #  Background Spool Replay Thread
-    # ----------------------------------------------------------------------
-    def start_replay_thread(self):
-        """
-        Starts a background thread that drains the spool slowly
-        while live data continues to stream.
-        """
-        t = threading.Thread(target=self._replay_loop, daemon=True)
-        t.start()
-
-    def _replay_loop(self):
-        """
-        Hybrid replay model:
-        - Live data is always prioritized
-        - Spool drains slowly in background
-        - Stops if streamer stops
-        """
-        while not self.stop_event.is_set():
-            time.sleep(2)
-
-            def handler(batch):
-                # Try to write batch
-                ok = self._write_to_influx(batch)
-                if not ok:
-                    raise RuntimeError("Influx still unreachable")
-
-            try:
-                self.spool.drain(handler, stop_event=self.stop_event, batch_size=500)
-            except Exception:
-                # Influx still down → wait and retry later
-                time.sleep(5)
-                continue
-    # ----------------------------------------------------------------------
-    #  Chrony + PPS Metrics
-    # ----------------------------------------------------------------------
     def _read_chrony_tracking(self) -> Dict[str, Any]:
-        """
-        Reads chrony tracking output and extracts timing metrics.
-        """
         try:
             out = subprocess.check_output(["chronyc", "tracking"], timeout=2).decode()
         except Exception:
@@ -324,7 +256,6 @@ class GNSSStreamer:
             elif key == "Ref time (UTC)":
                 metrics["ref_time"] = val
             elif key == "System time":
-                # Example: "0.000000123 seconds fast"
                 parts = val.split()
                 if len(parts) >= 2:
                     try:
@@ -372,9 +303,6 @@ class GNSSStreamer:
         return metrics
 
     def _emit_chrony_record(self):
-        """
-        Converts chrony tracking metrics into an InfluxDB record.
-        """
         m = self._read_chrony_tracking()
         if not m:
             return None
@@ -399,18 +327,111 @@ class GNSSStreamer:
             },
             "timestamp": time.time(),
         }
-    
-            # Additional gpsd classes (GST, ATT, etc.) can be added later
+
+    # ------------------------------------------------------------------
+    #  InfluxDB Write Path
+    # ------------------------------------------------------------------
+
+    def _write_to_influx(self, records: List[Dict[str, Any]]) -> bool:
+        if not records:
+            return True
+
+        lines = []
+        for rec in records:
+            measurement = rec["measurement"]
+            tags = rec["tags"]
+            fields = rec["fields"]
+            ts = rec["timestamp"]
+
+            tag_str = ",".join(f"{k}={v}" for k, v in tags.items() if v is not None)
+            field_str = ",".join(
+                f"{k}={json.dumps(v)}" for k, v in fields.items() if v is not None
+            )
+
+            line = f"{measurement},{tag_str} {field_str} {int(ts * 1e9)}"
+            lines.append(line)
+
+        payload = "\n".join(lines)
+
+        url = f"{self.influx_url}/api/v2/write"
+        params = {
+            "org": self.influx_org,
+            "bucket": self.influx_bucket,
+            "precision": "ns",
+        }
+        headers = {
+            "Authorization": f"Token {self.influx_token}",
+            "Content-Type": "text/plain; charset=utf-8",
+        }
+
+        try:
+            r = requests.post(url, params=params, data=payload, headers=headers, timeout=2)
+            return r.status_code == 204
+        except Exception:
+            return False
+
+    # ------------------------------------------------------------------
+    #  Record Handler (Live + Spool)
+    # ------------------------------------------------------------------
 
     def _handle_record(self, record: Dict[str, Any]):
-        """
-        Part 2 will add:
-        - Influx write
-        - spool-on-failure
-        - replay logic
-        """
-        # Placeholder for now — just spool everything
+        if self._write_to_influx([record]):
+            return
+
+        # Influx unreachable → spool
         self.spool.append(record)
 
-    def stop(self):
-        self.stop_event.set()
+    # ------------------------------------------------------------------
+    #  Background Replay Thread
+    # ------------------------------------------------------------------
+
+    def start_replay_thread(self):
+        t = threading.Thread(target=self._replay_loop, daemon=True)
+        t.start()
+
+    def _replay_loop(self):
+        while not self.stop_event.is_set():
+            time.sleep(2)
+
+            def handler(batch):
+                ok = self._write_to_influx(batch)
+                if not ok:
+                    raise RuntimeError("Influx still unreachable")
+
+            try:
+                self.spool.drain(handler, stop_event=self.stop_event, batch_size=500)
+            except Exception:
+                time.sleep(5)
+                continue
+
+
+# ======================================================================
+#  Entrypoint
+# ======================================================================
+
+def load_env(path: str = "/etc/pi5-ptp-node/streamer.env") -> Dict[str, str]:
+    env: Dict[str, str] = {}
+    try:
+        with open(path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                env[k.strip()] = v.strip()
+    except FileNotFoundError:
+        pass
+    return env
+
+
+def main():
+    env = load_env()
+    if not env:
+        return
+
+    streamer = GNSSStreamer(env)
+    streamer.start()
+
+
+if __name__ == "__main__":
+    main()
