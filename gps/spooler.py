@@ -128,3 +128,53 @@ class Spooler:
             except Exception:
                 # Any unexpected error: stop draining to avoid data loss
                 break
+
+    # ==================================================================
+    #  Compatibility Layer for gps_streamer.py
+    # ==================================================================
+
+    def enqueue(self, payload: str):
+        """
+        Store a raw line payload (string) into the spool.
+        Streamer uses this for line-based GNSS JSON.
+        """
+        with self._lock:
+            self._current_file.write(payload + "\n")
+            self._current_size += len(payload) + 1
+            self._rotate_if_needed()
+            self._enforce_size_limit()
+
+    def dequeue(self) -> Optional[str]:
+        """
+        Return the next raw line from the oldest spool file.
+        Deletes the file when empty.
+        """
+        for path in self.iter_files_in_order():
+            try:
+                with path.open("r") as f:
+                    lines = f.readlines()
+                if not lines:
+                    path.unlink()
+                    continue
+
+                first = lines[0].rstrip("\n")
+
+                # Rewrite file without the first line
+                if len(lines) > 1:
+                    with path.open("w") as f:
+                        f.writelines(lines[1:])
+                else:
+                    path.unlink()
+
+                return first
+
+            except FileNotFoundError:
+                continue
+
+        return None
+
+    def size_bytes(self) -> int:
+        """
+        Return total spool size in bytes.
+        """
+        return sum(f.stat().st_size for f in self.spool_dir.glob("spool_*.log"))
