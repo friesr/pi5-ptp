@@ -298,7 +298,108 @@ class GNSSStreamer:
                 # Influx still down → wait and retry later
                 time.sleep(5)
                 continue
+    # ----------------------------------------------------------------------
+    #  Chrony + PPS Metrics
+    # ----------------------------------------------------------------------
+    def _read_chrony_tracking(self) -> Dict[str, Any]:
+        """
+        Reads chrony tracking output and extracts timing metrics.
+        """
+        try:
+            out = subprocess.check_output(["chronyc", "tracking"], timeout=2).decode()
+        except Exception:
+            return {}
 
+        metrics = {}
+
+        for line in out.splitlines():
+            if ":" not in line:
+                continue
+            key, val = [x.strip() for x in line.split(":", 1)]
+
+            if key == "Reference ID":
+                metrics["reference_id"] = val
+            elif key == "Stratum":
+                metrics["stratum"] = int(val)
+            elif key == "Ref time (UTC)":
+                metrics["ref_time"] = val
+            elif key == "System time":
+                # Example: "0.000000123 seconds fast"
+                parts = val.split()
+                if len(parts) >= 2:
+                    try:
+                        metrics["system_time_offset_s"] = float(parts[0])
+                    except Exception:
+                        pass
+            elif key == "Last offset":
+                try:
+                    metrics["last_offset_s"] = float(val.split()[0])
+                except Exception:
+                    pass
+            elif key == "RMS offset":
+                try:
+                    metrics["rms_offset_s"] = float(val.split()[0])
+                except Exception:
+                    pass
+            elif key == "Frequency":
+                try:
+                    metrics["frequency_ppm"] = float(val.split()[0])
+                except Exception:
+                    pass
+            elif key == "Residual freq":
+                try:
+                    metrics["residual_freq_ppm"] = float(val.split()[0])
+                except Exception:
+                    pass
+            elif key == "Skew":
+                try:
+                    metrics["skew_ppm"] = float(val.split()[0])
+                except Exception:
+                    pass
+            elif key == "Root delay":
+                try:
+                    metrics["root_delay_s"] = float(val.split()[0])
+                except Exception:
+                    pass
+            elif key == "Root dispersion":
+                try:
+                    metrics["root_dispersion_s"] = float(val.split()[0])
+                except Exception:
+                    pass
+            elif key == "Leap status":
+                metrics["leap_status"] = val
+
+        return metrics
+
+    def _emit_chrony_record(self):
+        """
+        Converts chrony tracking metrics into an InfluxDB record.
+        """
+        m = self._read_chrony_tracking()
+        if not m:
+            return None
+
+        return {
+            "measurement": "chrony_tracking",
+            "tags": {
+                "node_id": self.node_id,
+                "reference_id": m.get("reference_id"),
+                "leap_status": m.get("leap_status"),
+            },
+            "fields": {
+                "stratum": m.get("stratum"),
+                "system_time_offset_s": m.get("system_time_offset_s"),
+                "last_offset_s": m.get("last_offset_s"),
+                "rms_offset_s": m.get("rms_offset_s"),
+                "frequency_ppm": m.get("frequency_ppm"),
+                "residual_freq_ppm": m.get("residual_freq_ppm"),
+                "skew_ppm": m.get("skew_ppm"),
+                "root_delay_s": m.get("root_delay_s"),
+                "root_dispersion_s": m.get("root_dispersion_s"),
+            },
+            "timestamp": time.time(),
+        }
+    
             # Additional gpsd classes (GST, ATT, etc.) can be added later
 
     def _handle_record(self, record: Dict[str, Any]):
