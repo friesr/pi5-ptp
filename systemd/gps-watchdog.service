@@ -1,0 +1,14 @@
+[Unit]
+Description=GNSS/PTP/Chrony watchdog
+After=gps-streamer.service chrony.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/pi5-ptp-node/gps
+ExecStart=/usr/bin/python3 /opt/pi5-ptp-node/gps/gps_watchdog.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
