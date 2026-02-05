@@ -9,7 +9,6 @@ import requests
 
 from spooler import Spooler
 
-
 # ------------------------------------------------------------
 # Logging
 # ------------------------------------------------------------
@@ -54,54 +53,75 @@ class GNSSStreamer:
             f"?org={self.influx_org}&bucket={self.influx_bucket}&precision=ns"
         )
 
-        log.info("GNSSStreamer initialized")
+        log.info("GNSSStreamer initialized (SKY-only)")
 
     # --------------------------------------------------------
-    # Convert gpspipe JSON → Line Protocol
+    # Convert gpspipe JSON → Line Protocol (SKY only)
     # --------------------------------------------------------
     def _convert_to_line_protocol(self, record):
         try:
             obj = json.loads(record)
         except json.JSONDecodeError:
-            return None
+            return []
 
-        if obj.get("class") != "TPV":
-            return None
+        if obj.get("class") != "SKY":
+            return []
 
-        lat = obj.get("lat")
-        lon = obj.get("lon")
-        alt = obj.get("alt")
-        speed = obj.get("speed")
-        climb = obj.get("climb")
-        track = obj.get("track")
-        mode = obj.get("mode")
+        # Timestamp for the whole SKY block
         timestamp = obj.get("time")
-
-        if lat is None or lon is None:
-            return None
-
-        fields = [f"lat={lat}", f"lon={lon}"]
-        if alt is not None:
-            fields.append(f"alt={alt}")
-        if speed is not None:
-            fields.append(f"speed={speed}")
-        if climb is not None:
-            fields.append(f"climb={climb}")
-        if track is not None:
-            fields.append(f"track={track}")
-
-        tag_str = f"mode={mode if mode is not None else 0}"
-        field_str = ",".join(fields)
-
         if timestamp:
             try:
                 dt = datetime.datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
                 ts = int(dt.timestamp() * 1_000_000_000)
-                return f"gnss,{tag_str} {field_str} {ts}"
             except Exception:
-                pass
+                ts = None
+        else:
+            ts = None
 
-        return f"gnss,{tag_str} {field_str}"
+        sats = obj.get("satellites", [])
+        lines = []
+
+        for sat in sats:
+            prn = sat.get("PRN")
+            snr = sat.get("ss")
+            el = sat.get("el")
+            az = sat.get("az")
+            used = sat.get("used")
+            doppler = sat.get("doppler")
+
+            if prn is None:
+                continue
+
+            # Tags
+            tags = [f"prn={prn}"]
+
+            # Fields
+            fields = []
+            if snr is not None:
+                fields.append(f"snr={snr}")
+            if el is not None:
+                fields.append(f"elevation_deg={el}")
+            if az is not None:
+                fields.append(f"azimuth_deg={az}")
+            if doppler is not None:
+                fields.append(f"doppler_hz={doppler}")
+            if used is not None:
+                fields.append(f"used={1 if used else 0}")
+
+            if not fields:
+                continue
+
+            tag_str = ",".join(tags)
+            field_str = ",".join(fields)
+
+            if ts is not None:
+                line = f"gnss_sky,{tag_str} {field_str} {ts}"
+            else:
+                line = f"gnss_sky,{tag_str} {field_str}"
+
+            lines.append(line)
+
+        return lines
 
     # --------------------------------------------------------
     # Write to InfluxDB (with spool fallback)
@@ -128,7 +148,7 @@ class GNSSStreamer:
     # Main loop
     # --------------------------------------------------------
     def start(self):
-        log.info("GNSSStreamer starting")
+        log.info("GNSSStreamer starting (SKY-only)")
 
         # Drain backlog first
         backlog = self.spool.dequeue()
@@ -142,13 +162,18 @@ class GNSSStreamer:
         # Live streaming loop
         while True:
             out = run_cmd("gpspipe -w -n 10")
-            for line in out.splitlines():
-                lp = self._convert_to_line_protocol(line)
-                if not lp:
-                    continue
+            batch = []
 
-                if not self._write_to_influx(lp):
-                    self.spool.enqueue(lp)
+            for line in out.splitlines():
+                lp_lines = self._convert_to_line_protocol(line)
+                if not lp_lines:
+                    continue
+                batch.extend(lp_lines)
+
+            if batch:
+                payload = "\n".join(batch)
+                if not self._write_to_influx(payload):
+                    self.spool.enqueue(payload)
 
             time.sleep(1)
 
@@ -158,4 +183,3 @@ class GNSSStreamer:
 # ------------------------------------------------------------
 if __name__ == "__main__":
     streamer = GNSSStreamer()
-    streamer.start()
